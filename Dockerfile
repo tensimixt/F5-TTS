@@ -19,12 +19,20 @@ WORKDIR /workspace
 RUN git clone https://github.com/SWivid/F5-TTS.git \
     && cd F5-TTS \
     && git submodule update --init --recursive \
-    && pip install -e . --no-cache-dir
+    && pip install -e . --no-cache-dir \
+    && pip install fastapi uvicorn python-multipart
+
+# Create a FastAPI application file
+COPY fastapi_server.py /workspace/F5-TTS/src/f5_tts/
 
 ENV SHELL=/bin/bash
 
 VOLUME /root/.cache/huggingface/hub/
 
-EXPOSE 7860
+# Change port from 7860 (Gradio) to 8000 (FastAPI standard)
+EXPOSE 8000
 
 WORKDIR /workspace/F5-TTS
+
+# Set the entrypoint to run Uvicorn with your FastAPI app
+ENTRYPOINT ["uvicorn", "f5_tts.fastapi_server:app", "--host", "0.0.0.0", "--port", "8000"]
