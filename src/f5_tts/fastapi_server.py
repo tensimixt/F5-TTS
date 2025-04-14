@@ -1,15 +1,16 @@
 # fastapi_server.py
 import random
 import sys
+import os
 from importlib.resources import files
 
 import soundfile as sf
 import torch
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile, Response
 from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import tempfile
-import os
 from typing import Optional
 
 from f5_tts.infer.utils_infer import (
@@ -18,7 +19,7 @@ from f5_tts.infer.utils_infer import (
     transcribe,
     preprocess_ref_audio_text,
     infer_process,
-    remove_silence_for_generated_wav,  # This is the correct function name
+    remove_silence_for_generated_wav,
     save_spectrogram,
 )
 from f5_tts.model.utils import seed_everything
@@ -27,6 +28,19 @@ from hydra.utils import get_class
 from omegaconf import OmegaConf
 
 app = FastAPI()
+
+# Add CORS middleware to allow cross-origin requests
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Create output directory
+OUTPUT_DIR = os.path.join(tempfile.gettempdir(), "f5tts_outputs")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # Load models
 model_name = "F5TTS_v1_Base"
@@ -91,60 +105,82 @@ async def tts(
     speed: float = Form(1.0),
     seed: Optional[int] = Form(None)
 ):
-    # Save uploaded file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as temp_file:
-        temp_file.write(await file.read())
-        ref_file = temp_file.name
-    
-    # Set seed if provided
-    if seed is not None:
-        seed_everything(seed)
-    else:
-        seed = random.randint(0, sys.maxsize)
-        seed_everything(seed)
-    
-    # Process reference audio and text
-    ref_file, ref_text = preprocess_ref_audio_text(ref_file, ref_text)
-    
-    # Generate audio
-    wav, sr, spec = infer_process(
-        ref_file,
-        ref_text,
-        gen_text,
-        ema_model,
-        vocoder,
-        mel_spec_type,
-        show_info=print,
-        target_rms=target_rms,
-        cross_fade_duration=cross_fade_duration,
-        nfe_step=nfe_step,
-        cfg_strength=cfg_strength,
-        sway_sampling_coef=sway_sampling_coef,
-        speed=speed,
-        device=device,
-    )
-    
-    # Save output files
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as wav_file:
-        sf.write(wav_file.name, wav, sr)
+    try:
+        # Save uploaded file
+        temp_ref_file = os.path.join(OUTPUT_DIR, f"ref_{random.randint(0, 100000)}.wav")
+        with open(temp_ref_file, "wb") as f:
+            f.write(await file.read())
+        
+        # Set seed if provided
+        if seed is not None:
+            seed_everything(seed)
+        else:
+            seed = random.randint(0, sys.maxsize)
+            seed_everything(seed)
+        
+        # Process reference audio and text
+        ref_file, ref_text = preprocess_ref_audio_text(temp_ref_file, ref_text)
+        
+        # Generate audio
+        wav, sr, spec = infer_process(
+            ref_file,
+            ref_text,
+            gen_text,
+            ema_model,
+            vocoder,
+            mel_spec_type,
+            show_info=print,
+            target_rms=target_rms,
+            cross_fade_duration=cross_fade_duration,
+            nfe_step=nfe_step,
+            cfg_strength=cfg_strength,
+            sway_sampling_coef=sway_sampling_coef,
+            speed=speed,
+            device=device,
+        )
+        
+        # Save output files
+        output_filename = f"output_{seed}.wav"
+        output_path = os.path.join(OUTPUT_DIR, output_filename)
+        
+        sf.write(output_path, wav, sr)
         if remove_silence:
-            remove_silence_for_generated_wav(wav_file.name)
-        output_path = wav_file.name
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as spec_file:
-        save_spectrogram(spec, spec_file.name)
-        spec_path = spec_file.name
-    
-    # Return the audio file
-    return FileResponse(
-        output_path,
-        media_type="audio/wav",
-        headers={"X-Seed": str(seed), "X-Spectrogram": spec_path}
-    )
+            remove_silence_for_generated_wav(output_path)
+        
+        spec_filename = f"spec_{seed}.png"
+        spec_path = os.path.join(OUTPUT_DIR, spec_filename)
+        save_spectrogram(spec, spec_path)
+        
+        # Return the audio file with appropriate headers
+        return FileResponse(
+            output_path,
+            media_type="audio/wav",
+            filename=output_filename,
+            headers={
+                "X-Seed": str(seed),
+                "X-Spectrogram": spec_filename,
+                "Content-Disposition": f"attachment; filename={output_filename}"
+            }
+        )
+    except Exception as e:
+        import traceback
+        print(f"Error in TTS endpoint: {e}")
+        print(traceback.format_exc())
+        return Response(
+            content=str(e),
+            status_code=500
+        )
+    finally:
+        # Clean up reference file
+        if 'temp_ref_file' in locals():
+            try:
+                os.unlink(temp_ref_file)
+            except:
+                pass
 
 @app.get("/")
 def read_root():
-    return {"message": "F5-TTS API is running"}
+    return {"message": "F5-TTS API is running", "version": "1.0.0"}
 
 if __name__ == "__main__":
     import uvicorn
