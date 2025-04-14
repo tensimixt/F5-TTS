@@ -23,7 +23,7 @@ RUN git clone https://github.com/SWivid/F5-TTS.git \
     && pip install fastapi uvicorn python-multipart
 
 # Create a FastAPI application file
-COPY fastapi_server.py /workspace/F5-TTS/src/f5_tts/
+COPY /src/f5_tts/fastapi_server.py /workspace/F5-TTS/src/f5_tts/
 
 ENV SHELL=/bin/bash
 
